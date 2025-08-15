@@ -1,4 +1,6 @@
-export default function InsightCard({ title, value, rating }) {
+import React from 'react';
+
+export default function InsightCard({ title, value, rating, loading }) {
   const isLoading = value === "0%";
   return (
     <div className="bg-white shadow-md rounded-lg p-4 text-center">
