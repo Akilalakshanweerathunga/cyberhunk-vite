@@ -10,7 +10,7 @@ nltk.download('vader_lexicon')
 sia = SentimentIntensityAnalyzer()
 translator = Translator()
 
-# Load ML model
+# Load ML model if available
 try:
     model = load('../ml_modals/sentiment_model.pkl')
     use_ml_model = True
@@ -22,7 +22,8 @@ except:
 EMOJI_SENTIMENT = {
     "😀": "positive", "😃": "positive", "😄": "positive", "😁": "positive",
     "😆": "positive", "😊": "positive", "🙂": "positive", "😍": "positive",
-    "🤩": "positive",
+    "🤩": "positive", "😂": "positive", "🤣": "positive", "🥰": "positive",
+    "😎": "positive",
     "😢": "negative", "😞": "negative", "😠": "negative", "😡": "negative",
     "😔": "negative", "😭": "negative", "😖": "negative", "😣": "negative",
     "😐": "neutral", "😶": "neutral",
@@ -39,7 +40,7 @@ def extract_emojis(text):
     return [char for char in text if char in emoji.EMOJI_DATA]
 
 def analyze_text(text, method='nltk'):
-    if not text:
+    if not text or not text.strip():
         return {
             "original": "",
             "translated": "",
@@ -50,6 +51,7 @@ def analyze_text(text, method='nltk'):
 
     translated = translate_text(text)
 
+    # Text sentiment
     if method == 'ml' and use_ml_model:
         try:
             label = model.predict([translated])[0]
@@ -60,16 +62,24 @@ def analyze_text(text, method='nltk'):
         score = sia.polarity_scores(translated)
         label = 'positive' if score['compound'] > 0.2 else 'negative' if score['compound'] < -0.2 else 'neutral'
 
+    # Emoji sentiment
     emojis = extract_emojis(text)
     emoji_labels = [EMOJI_SENTIMENT.get(e, "neutral") for e in emojis]
 
-    if emoji_labels:
-        if emoji_labels.count("positive") > emoji_labels.count("negative"):
-            label = "positive"
-        elif emoji_labels.count("negative") > emoji_labels.count("positive"):
-            label = "negative"
-        else:
+    # Combine text and emoji sentiment
+    pos_count = emoji_labels.count("positive")
+    neg_count = emoji_labels.count("negative")
+
+    if pos_count > neg_count:
+        if label == "negative":
             label = "neutral"
+        else:
+            label = "positive"
+    elif neg_count > pos_count:
+        if label == "positive":
+            label = "neutral"
+        else:
+            label = "negative"
 
     result = {
         "original": text,
@@ -94,10 +104,10 @@ def mentions_location(text):
 
 def discloses_personal_info(text):
     patterns = [
-        r"\b\d{10}\b",  # phone numbers
-        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}",  # email
-        r"\b\d{1,4}\s\w+(\s\w+){0,3}",  # simple address
-        r"(colombo|kandy|galle|my place|home|address|city)"  # locations
+        r"\b\d{10}\b",
+        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}",
+        r"\b\d{1,4}\s\w+(\s\w+){0,3}",
+        r"(colombo|kandy|galle|my place|home|address|city)"
     ]
     return any(re.search(p, text, re.IGNORECASE) for p in patterns)
 

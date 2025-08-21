@@ -9,22 +9,33 @@ from .services import (
 )
 import requests
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
+MAX_THREADS = 10  # Parallel threads
 
-def fetch_all_comments(post_id, token):
-    """Fetch all comments for a given post, handling pagination."""
+def fetch_comments(post_id, token):
     comments = []
-    next_url = f"https://graph.facebook.com/v19.0/{post_id}/comments?fields=message,created_time&limit=50&access_token={token}"
+    next_url = f"https://graph.facebook.com/v19.0/{post_id}/comments?fields=message,created_time,comments&limit=50&access_token={token}"
     while next_url:
         try:
             res = requests.get(next_url).json()
-            comments.extend(res.get("data", []))
+            data = res.get("data", [])
+            comments.extend(data)
             next_url = res.get("paging", {}).get("next")
         except Exception as e:
             logger.error(f"Failed to fetch comments for post {post_id}: {e}")
             break
     return comments
+
+def fetch_all_nested_comments(comment, token):
+    nested_comments = []
+    if "comments" in comment:
+        nested_data = comment["comments"].get("data", [])
+        for nested in nested_data:
+            nested_comments.append(nested)
+            nested_comments.extend(fetch_all_nested_comments(nested, token))
+    return nested_comments
 
 def analyze_facebook(request):
     token = request.GET.get('token')
@@ -42,7 +53,7 @@ def analyze_facebook(request):
         profile_data = {"error": "Failed to fetch profile data", "details": str(e)}
 
     insights = []
-    next_url = f"https://graph.facebook.com/v19.0/me/posts?fields=message,story,status_type,created_time&limit=25&access_token={token}"
+    next_url = f"https://graph.facebook.com/v19.0/me/posts?fields=message,story,status_type,created_time,object_id&limit=25&access_token={token}"
 
     while next_url:
         try:
@@ -51,20 +62,23 @@ def analyze_facebook(request):
 
             for post in posts:
                 content = post.get("message") or post.get("story") or ""
-                if not content.strip() and post.get("status_type") == "shared_story":
-                    content = "Shared content (no text)"
+
+                # Shared post
+                if post.get("status_type") == "shared_story":
+                    shared_id = post.get("object_id")
+                    if shared_id:
+                        shared_url = f"https://graph.facebook.com/v19.0/{shared_id}?fields=message&access_token={token}"
+                        try:
+                            shared_data = requests.get(shared_url).json()
+                            content = shared_data.get("message", content)
+                        except:
+                            logger.warning(f"Failed fetching shared post content for {shared_id}")
 
                 try:
                     analysis = analyze_text(content, method=method)
                 except Exception as e:
                     logger.error(f"Failed to analyze post: {content}\nError: {e}")
-                    analysis = {
-                        "original": content,
-                        "translated": "",
-                        "label": "neutral",
-                        "emojis": [],
-                        "emoji_sentiments": []
-                    }
+                    analysis = {"original": content, "translated": "", "label": "neutral", "emojis": [], "emoji_sentiments": []}
 
                 analysis.update({
                     "timestamp": post.get("created_time"),
@@ -78,21 +92,34 @@ def analyze_facebook(request):
                 })
                 insights.append(analysis)
 
-                # Fetch and analyze all comments
-                comments = fetch_all_comments(post["id"], token)
-                for comment in comments:
-                    comment_msg = comment.get("message") or "No text content"
+                # Fetch comments
+                top_comments = fetch_comments(post["id"], token)
+                all_comments = []
+
+                # Parallel nested comment fetching
+                with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+                    futures = {executor.submit(fetch_all_nested_comments, comment, token): comment for comment in top_comments}
+                    for future in as_completed(futures):
+                        comment = futures[future]
+                        try:
+                            nested_comments = future.result()
+                        except Exception as e:
+                            logger.error(f"Failed fetching nested comments: {e}")
+                            nested_comments = []
+
+                        all_comments.append(comment)
+                        all_comments.extend(nested_comments)
+
+                # Analyze all comments
+                for comment in all_comments:
+                    comment_msg = comment.get("message")
+                    if not comment_msg:
+                        continue
                     try:
                         c_analysis = analyze_text(comment_msg, method=method)
                     except Exception as e:
                         logger.error(f"Failed to analyze comment: {comment_msg}\nError: {e}")
-                        c_analysis = {
-                            "original": comment_msg,
-                            "translated": "",
-                            "label": "neutral",
-                            "emojis": [],
-                            "emoji_sentiments": []
-                        }
+                        c_analysis = {"original": comment_msg, "translated": "", "label": "neutral", "emojis": [], "emoji_sentiments": []}
 
                     c_analysis.update({
                         "timestamp": comment.get("created_time"),
@@ -111,7 +138,4 @@ def analyze_facebook(request):
             logger.error(f"Failed to fetch/process Facebook posts\nError: {e}")
             return JsonResponse({"error": "Failed to fetch or process Facebook data", "details": str(e)}, status=500)
 
-    return JsonResponse({
-        "profile": profile_data,
-        "insights": insights
-    })
+    return JsonResponse({"profile": profile_data, "insights": insights})
